@@ -1,0 +1,37 @@
+[profile.default]
+src = "src" # Директория с исходным кодом контрактов
+out = "out" # Директория для скомпилированных артефактов
+libs = ["lib"] # Директория с библиотеками
+solc_version = "0.8.30"
+optimizer = true
+optimizer_runs = 200 # Стандартное значение, можно настроить
+ffi = true
+ast = true
+build_info = true
+via_ir = true
+extra_output = ["storageLayout"]
+private_key = "${PRIVATE_KEY}"
+
+# Настройки для RPC эндпоинтов (используются в скриптах)
+[rpc_endpoints]
+arbitrum = "${MAINNET_RPC_URL}"
+arbitrum-sepolia = "${SEPOLIA_RPC_URL}"
+
+# Настройки для Etherscan API (для верификации контрактов)
+[etherscan]
+#arbitrum-sepolia = { key = "${ARBISCAN_API_KEY}", url = "https://api-sepolia.arbiscan.io/api", chain = "arbitrum-sepolia" }
+#base = { key = "${ETHERSCAN_API_KEY}", url = "https://api.basescan.org/api", chain = "base" }
+#base_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api", chain = "base-sepolia" }
+#sepolia_api_key = { key = "${ETHERSCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api", chain = "base-sepolia" }
+#mainnet_api_key = { key = "${ETHERSCAN_API_KEY}", url = "https://api.basescan.org/api", chain = "base" }
+
+
+# Чтобы `forge coverage` не учитывал определенные файлы или контракты:
+# [profile.default.fuzz]
+# runs = 256
+# [profile.default.invariant]
+# runs = 256
+# depth = 15
+# fail_on_revert = false
+# call_override = false
+# See more config options https://github.com/foundry-rs/foundry/tree/master/config
