@@ -8,7 +8,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+
+import {TickMath} from "./libraries/TickMath.sol";
 
 import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/IPermit2.sol";
@@ -157,7 +158,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         token0 = _token0;
         token1 = _token1;
         fee = _fee;
-        emit CreatePool(msg.sender, _token0, _token1, _fee, _sqrtPriceX96, poolAddress);
+//        emit CreatePool(msg.sender, _token0, _token1, _fee, _sqrtPriceX96, poolAddress);
     }
 
     function mintPosition(
@@ -182,14 +183,14 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
             lowTick: _tickLower,
             upperTick: _tickUpper
         }));
-        _resetApprove(info.token0, info.token1);
+        _resetApprove(token0, token1);
     }
 
     function burnPosition(
         uint256 _tokenId,
         uint256 _amount0Min,
         uint256 _amount1Min
-    ) public onlyOwnerOrThisContract {
+    ) public onlyOwner {
         uint256 index = _findIndexByTokenId(_tokenId);
         _deletePosition(index);
 
@@ -197,14 +198,14 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         _decreaseLiquidity(_tokenId, liquidity, _amount0Min, _amount1Min);
         collectPoolAllFees();
         nonfungiblePositionManager.burn(_tokenId);
-        emit BurnPosition(tx.origin, pool, _tokenId);
+        //emit BurnPosition(tx.origin, pool, _tokenId);
     }
 
     function increaseLiquidity(
         uint256 _tokenId,
         uint128 _amount0Max,
         uint128 _amount1Max
-    ) public onlyOwnerOrThisContract returns (
+    ) public onlyOwner returns (
         uint128 liquidity, uint256 amount0, uint256 amount1
     ) {
         _checkAvailableBalance( _amount0Max, _amount1Max);
@@ -214,7 +215,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         );
         _resetApprove(token0, token1);
         collectPoolAllFees();
-        emit IncreaseLiquidity(tx.origin, _tokenId, _liquidity);
+//        emit IncreaseLiquidity(tx.origin, _tokenId, _liquidity);
     }
 
     function decreaseLiquidity(
@@ -230,12 +231,6 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         collectPoolAllFees();
     }
 
-    function collectFeesFromPosition(
-        uint256 _index
-    ) public {
-
-    }
-
     function rescue(address payable _to, uint256 _amount) external override onlyOwner {
         _checkZeroAddress(_to);
         _checkZeroAmount(_amount);
@@ -248,6 +243,20 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         _checkZeroAmount(_amount);
         TransferHelper.safeTransfer(_token, _to, _amount);
         emit RescueToken(_token, _to, _amount);
+    }
+
+    /// ===============================================================
+    /// callback area
+    /// ===============================================================
+
+    function onERC721Received(
+        address _operator,
+        address _from,
+        uint256 _tokenId,
+        bytes calldata _data
+    ) external override returns (bytes4) {
+        emit OnERC721Received(_operator, _from, _tokenId, _data);
+        return IERC721Receiver.onERC721Received.selector;
     }
 
     /// ===============================================================
@@ -268,13 +277,13 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         if (balance0 < _amount0ToAdd) {
             revert(string(abi.encodePacked(
                 "PoolMaster: not enough available amount for token0: ",
-                _uint256ToString(_amount0ToAdd - available0)))
+                _uint256ToString(_amount0ToAdd - balance0)))
             );
         }
         if (balance1 < _amount1ToAdd) {
             revert(string(abi.encodePacked(
                 "PoolMaster: not enough available amount for token1: ",
-                _uint256ToString(_amount1ToAdd - available1)))
+                _uint256ToString(_amount1ToAdd - balance1)))
             );
         }
     }
@@ -356,7 +365,6 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
             });
 
         (feeAmount0, feeAmount1) = nonfungiblePositionManager.collect(params);
-        emit CollectAllFees(pool, _tokenId, feeAmount0, feeAmount1);
     }
 
     function _mintPosition(

@@ -12,6 +12,9 @@ via_ir = true
 extra_output = ["storageLayout"]
 private_key = "${PRIVATE_KEY}"
 
+[fmt]
+solc_version = "0.7.6"
+
 # Настройки для RPC эндпоинтов (используются в скриптах)
 [rpc_endpoints]
 arbitrum = "${MAINNET_RPC_URL}"
