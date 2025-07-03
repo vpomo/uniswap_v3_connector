@@ -26,8 +26,8 @@ import {IUniswapV3Pool} from "../lib/v3-core/contracts/interfaces/IUniswapV3Pool
 
 
 contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMaster, UUPSUpgradeable {
-    int24 private constant MIN_TICK = -887272;
-    int24 private constant MAX_TICK = -MIN_TICK;
+    int24 private constant MIN_TICK = - 887272;
+    int24 private constant MAX_TICK = - MIN_TICK;
     int24 private constant TICK_SPACING = 200;
 
     uint256 private constant MULTIPLIER = 1 ether;
@@ -43,7 +43,10 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     address public token0;
     address public token1;
     uint24 public fee;
+    int24 tickSpacing;
     IUniswapV3Pool public pool;
+
+    PositionInfo[] public positions;
 
     event Rescue(address indexed to, uint amount);
     event RescueToken(address indexed token, address indexed to, uint amount);
@@ -66,7 +69,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     event ChangeRange(
         address indexed sender, address indexed pool, uint160 sqrtPriceLimitX96,
         uint256 amount0, uint256 amount1,
-        int24 lowerTick,int24 upperTick
+        int24 lowerTick, int24 upperTick
     );
     event CollectAllFees(address indexed pool, uint256 tokenId, uint256 feeAmount0, uint256 feeAmount1);
     event CreateSomePool(
@@ -105,6 +108,37 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     receive() external payable {
     }
 
+    /// ===============================================================
+    /// writing area for anybody
+    /// ===============================================================
+
+    function swapExactInputSingle(
+        uint256 _amountIn,
+        uint256 _minAmountOut,
+        bool _zeroForOne
+    ) public payable nonReentrant returns (uint256 amountOut) {
+        address poolToken0 = _zeroForOne ? token0 : token1;
+        address poolToken1 = _zeroForOne ? token1 : token0;
+        TransferHelper.safeTransferFrom(poolToken0, msg.sender, address(this), _amountIn);
+        return _executeSwapExactIn(poolToken0, poolToken1, fee, _amountIn, _minAmountOut, msg.sender);
+    }
+
+    function collectFeesFromPosition(
+        uint256 _index
+    ) public {
+        _collectPoolAllFees(positions[_index].tokenId);
+    }
+
+    function collectPoolAllFees() public {
+        for (uint256 i = 0; i < positions.length; i++) {
+            _collectPoolAllFees(positions[i].tokenId);
+        }
+    }
+
+    /// ===============================================================
+    /// owner's writing area
+    /// ===============================================================
+
     function createPool(
         address _token0, address _token1, uint24 _fee, uint160 _sqrtPriceX96
     ) external override onlyOwner {
@@ -126,119 +160,80 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         emit CreatePool(msg.sender, _token0, _token1, _fee, _sqrtPriceX96, poolAddress);
     }
 
-    /// ===============================================================
-    /// writing area for anybody
-    /// ===============================================================
-
-    function swapExactInputSingle(
-        uint256 _amountIn,
-        uint256 _minAmountOut,
-        bool _zeroForOne
-    ) public payable nonReentrant returns(uint256 amountOut) {
-        address poolToken0 = _zeroForOne ? token0 : token1;
-        address poolToken1 = _zeroForOne ? token1 : token0;
-        TransferHelper.safeTransferFrom(poolToken0, msg.sender, address(this), _amountIn);
-        return _executeSwapExactIn(poolToken0, poolToken1, fee, _amountIn, _minAmountOut, msg.sender);
-    }
-
-    function collectPoolAllFees(address _pool) public {
-        PoolData storage data = _poolData[_pool];
-        (uint256 feeAmount0, uint256 feeAmount1) = _collectPoolAllFees(_pool);
-        data.currToken0Fee += feeAmount0;
-        data.currToken1Fee += feeAmount1;
-        data.totalToken0Fee += feeAmount0;
-        data.totalToken1Fee += feeAmount1;
-    }
-
-    /// ===============================================================
-    /// owner's writing area
-    /// ===============================================================
-
-    function mintPoolPosition(
-        address _pool,
-        uint256 _amount0ToAdd,
-        uint256 _amount1ToAdd,
-        int24 _lowerTick,
-        int24 _upperTick
+    function mintPosition(
+        int24 _tickLower,
+        int24 _tickUpper,
+        uint256 _amount0Max,
+        uint256 _amount1Max
     ) external onlyOwner returns (
         uint256 tokenId,
         uint128 liquidity,
         uint256 amount0,
         uint256 amount1
     ) {
-        PoolInfo memory info = getPoolInfo(_pool);
-        require(info.isActive, "PoolMaster: pool isn't active");
-
-        _prepareApprove(info.token0, info.token1, _amount0ToAdd, _amount1ToAdd);
+        _prepareApprove(token0, token1, _amount0Max, _amount1Max);
         (tokenId, liquidity, amount0, amount1) = _mintPosition(
-                info.token0, info.token1, info.fee,
-                _amount0ToAdd, _amount1ToAdd, _lowerTick, _upperTick,
-                address(this), info.tickSpacing
+            token0, token1, fee,
+            _amount0Max, _amount1Max, _tickLower, _tickUpper,
+            address(this), tickSpacing
         );
-        PoolData storage data = _poolData[_pool];
-        data.currentTokenId = tokenId;
+        positions.push(PositionInfo({
+            tokenId: tokenId,
+            lowTick: _tickLower,
+            upperTick: _tickUpper
+        }));
         _resetApprove(info.token0, info.token1);
     }
 
-    function increasePoolLiquidityCurrentRange(
-        address _pool,
-        uint256 _amount0ToAdd,
-        uint256 _amount1ToAdd
+    function burnPosition(
+        uint256 _tokenId,
+        uint256 _amount0Min,
+        uint256 _amount1Min
+    ) public onlyOwnerOrThisContract {
+        uint256 index = _findIndexByTokenId(_tokenId);
+        _deletePosition(index);
+
+        (, , , , , , , uint128 liquidity, , , ,) = nonfungiblePositionManager.positions(_tokenId);
+        _decreaseLiquidity(_tokenId, liquidity, _amount0Min, _amount1Min);
+        collectPoolAllFees();
+        nonfungiblePositionManager.burn(_tokenId);
+        emit BurnPosition(tx.origin, pool, _tokenId);
+    }
+
+    function increaseLiquidity(
+        uint256 _tokenId,
+        uint128 _amount0Max,
+        uint128 _amount1Max
     ) public onlyOwnerOrThisContract returns (
         uint128 liquidity, uint256 amount0, uint256 amount1
     ) {
-        _checkAvailableBalance(_pool, _amount0ToAdd, _amount1ToAdd);
-        PoolInfo memory info = getPoolInfo(_pool);
-
-        _prepareApprove(info.token0, info.token1, _amount0ToAdd, _amount1ToAdd);
-        uint256 positionId = _poolData[_pool].currentTokenId;
-        (liquidity, amount0, amount1) = _increasePoolLiquidityCurrentRange(positionId, _amount0ToAdd, _amount1ToAdd);
-        _resetApprove(info.token0, info.token1);
-    }
-
-    function decreasePoolLiquidityCurrentRange(address _pool, uint128 _liquidity) public onlyOwner returns (
-        uint256 amount0, uint256 amount1
-    ) {
-        (amount0, amount1) = _decreasePoolLiquidityCurrentRange(_pool, _liquidity);
-        _collectPoolAllFees(_pool);
-    }
-
-    function changeRange(
-        address _pool,
-        uint160 _sqrtPriceLimitX96,
-        uint256 _amount0ToAdd,
-        uint256 _amount1ToAdd,
-        int24 _lowerTick,
-        int24 _upperTick
-    ) external onlyOwner {
-        PoolInfo memory info = getPoolInfo(_pool);
-        _checkTicks(_lowerTick, _upperTick, info.tickSpacing);
-        burnPosition(_pool);
-        _checkAvailableBalance(_pool, _amount0ToAdd, _amount1ToAdd);
-        PoolData storage data = _poolData[_pool];
-
-
-        _prepareApprove(info.token0, info.token1, _amount0ToAdd, _amount1ToAdd);
-        require(data.currentTokenId == 0, 'PoolMaster: the position already exists');
-        (uint256 tokenId, , uint256 amount0, uint256 amount1) = _mintPosition(
-                info.token0, info.token1, info.fee, _amount0ToAdd, _amount1ToAdd,
-                _lowerTick, _upperTick, address(this), info.tickSpacing
+        _checkAvailableBalance( _amount0Max, _amount1Max);
+        _prepareApprove(token0, token1, _amount0Max, _amount1Max);
+        (liquidity, amount0, amount1) = _increaseLiquidity(
+            _tokenId, _amount0Max, _amount1Max
         );
-        data.currentTokenId = tokenId;
-        _resetApprove(info.token0, info.token1);
-        emit ChangeRange(msg.sender, _pool, _sqrtPriceLimitX96, amount0, amount1, _lowerTick, _upperTick);
+        _resetApprove(token0, token1);
+        collectPoolAllFees();
+        emit IncreaseLiquidity(tx.origin, _tokenId, _liquidity);
     }
 
-    function burnPosition(address _pool) public onlyOwnerOrThisContract {
-        PoolData storage data = _poolData[_pool];
-        uint256 positionId = data.currentTokenId;
-        ( , , , , , , , uint128 liquidity, , , , ) = nonfungiblePositionManager.positions(positionId);
-        collectPoolAllFees(_pool);
-        _decreasePoolLiquidityCurrentRange(_pool, liquidity);
-        collectPoolAllFees(_pool);
-        nonfungiblePositionManager.burn(positionId);
-        emit BurnPosition(msg.sender, _pool, positionId);
-        data.currentTokenId = 0;
+    function decreaseLiquidity(
+        uint256 _tokenId,
+        uint128 _liquidity,
+        uint256 _amount0Min,
+        uint256 _amount1Min
+    ) public onlyOwner returns (uint256 amount0, uint256 amount1)
+    {
+        (amount0, amount1) = _decreaseLiquidity(
+            _tokenId, _liquidity, _amount0Min, _amount1Min
+        );
+        collectPoolAllFees();
+    }
+
+    function collectFeesFromPosition(
+        uint256 _index
+    ) public {
+
     }
 
     function rescue(address payable _to, uint256 _amount) external override onlyOwner {
@@ -258,32 +253,28 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     /// ===============================================================
     /// reading area
     /// ===============================================================
+    function getPosition(uint256 _id) public override view returns (PositionInfo memory) {
+        return positions[_id];
+    }
 
     /// ===============================================================
     /// internal and private area
     /// ===============================================================
 
-    function _checkAvailableBalance(address _pool, uint256 _amount0ToAdd, uint256 _amount1ToAdd) private view {
-        PoolInfo memory info = getPoolInfo(_pool);
-        uint256 balance0 = IERC20(info.token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(info.token1).balanceOf(address(this));
-        PoolData storage data = _poolData[_pool];
+    function _checkAvailableBalance(uint256 _amount0ToAdd, uint256 _amount1ToAdd) private view {
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
 
-        require(data.currToken0Fee < balance0, "PoolMaster: incorrect available amount for token0's fee");
-        require(data.currToken1Fee < balance1, "PoolMaster: incorrect available amount for token1's fee");
-
-        uint256 available0 = balance0 - data.currToken0Fee;
-        uint256 available1 = balance1 - data.currToken1Fee;
-        if (available0 < _amount0ToAdd) {
+        if (balance0 < _amount0ToAdd) {
             revert(string(abi.encodePacked(
-                    "PoolMaster: not enough available amount for token0: ",
-                    _uint256ToString(_amount0ToAdd - available0)))
+                "PoolMaster: not enough available amount for token0: ",
+                _uint256ToString(_amount0ToAdd - available0)))
             );
         }
-        if (available1 < _amount1ToAdd) {
+        if (balance1 < _amount1ToAdd) {
             revert(string(abi.encodePacked(
-                    "PoolMaster: not enough available amount for token1: ",
-                    _uint256ToString(_amount1ToAdd - available1)))
+                "PoolMaster: not enough available amount for token1: ",
+                _uint256ToString(_amount1ToAdd - available1)))
             );
         }
     }
@@ -296,18 +287,12 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         require(_value > 0, 'PoolMaster: should be greater than 0');
     }
 
-    function _checkTicks(int24 _lowerTick, int24 _upperTick, int24 _tickSpacing) private pure returns(int24 low, int24 upper){
+    function _checkTicks(int24 _lowerTick, int24 _upperTick, int24 _tickSpacing) private pure returns (int24 low, int24 upper){
         require(_lowerTick < _upperTick, 'PoolMaster: wrong tick order');
         require(_lowerTick >= MIN_TICK && _lowerTick < MAX_TICK, 'PoolMaster: wrong lower tick');
         require(_upperTick <= MAX_TICK && _upperTick > MIN_TICK, 'PoolMaster: wrong upper tick');
         low = (_lowerTick / _tickSpacing) * _tickSpacing;
         upper = (_upperTick / _tickSpacing) * _tickSpacing;
-    }
-
-    function _sortPoolTokens(address _token0, address _token1) private pure returns(
-        address poolToken0, address poolToken1
-    ) {
-        return _token0 > _token1 ? (_token1, _token0):(_token0, _token1);
     }
 
     function _resetApprove(address _token0, address _token1) private {
@@ -318,13 +303,6 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     function _prepareApprove(address _token0, address _token1, uint256 _amount0ToAdd, uint256 _amount1ToAdd) private {
         TransferHelper.safeApprove(_token0, address(nonfungiblePositionManager), _amount0ToAdd);
         TransferHelper.safeApprove(_token1, address(nonfungiblePositionManager), _amount1ToAdd);
-    }
-
-    function _prepareApproveForPM(
-        address _token0, address _token1, uint256 _amount0ToAdd, uint256 _amount1ToAdd, address _pm
-    ) private {
-        TransferHelper.safeApprove(_token0, _pm, _amount0ToAdd);
-        TransferHelper.safeApprove(_token1, _pm, _amount1ToAdd);
     }
 
     function _prepareTokens(address _token0, address _token1, uint256 _amount0ToAdd, uint256 _amount1ToAdd) private {
@@ -343,7 +321,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         uint256 _amountIn,
         uint256 _amountOutMin,
         address _recipient
-    ) private returns(uint256 amountOut) {
+    ) private returns (uint256 amountOut) {
         uint256 beforeAmountOut = IERC20(_tokenOut).balanceOf(address(this));
         uint256 deadline = block.timestamp + 60;
         IPermit2(permit2).approve(_tokenIn, address(universalRouter), uint160(_amountIn), uint48(deadline));
@@ -368,21 +346,17 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         return afterAmountOut - beforeAmountOut;
     }
 
-    function _collectPoolAllFees(address _pool) private returns (uint256 feeAmount0, uint256 feeAmount1) {
-        PoolData storage data = _poolData[_pool];
-        uint256 positionId = data.currentTokenId;
-
+    function _collectPoolAllFees(uint256 _tokenId) private returns (uint256 feeAmount0, uint256 feeAmount1) {
         INonfungiblePositionManager.CollectParams memory params =
-        INonfungiblePositionManager.CollectParams({
-        tokenId: positionId,
-        recipient: address(this),
-        amount0Max: type(uint128).max,
-        amount1Max: type(uint128).max
-        });
+                            INonfungiblePositionManager.CollectParams({
+                tokenId: _tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            });
 
         (feeAmount0, feeAmount1) = nonfungiblePositionManager.collect(params);
-        data.lastCollectFees = block.timestamp;
-        emit CollectAllFees(_pool, positionId, feeAmount0, feeAmount1);
+        emit CollectAllFees(pool, _tokenId, feeAmount0, feeAmount1);
     }
 
     function _mintPosition(
@@ -405,7 +379,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         require(_token0 < _token1, "PoolMaster: incorrect token order");
 
         INonfungiblePositionManager.MintParams memory params =
-        INonfungiblePositionManager.MintParams({
+                            INonfungiblePositionManager.MintParams({
                 token0: _token0,
                 token1: _token1,
                 fee: _fee,
@@ -416,15 +390,15 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
                 amount0Min: 0,
                 amount1Min: 0,
                 recipient: _recipient,
-                deadline: block.timestamp + DELAY
-        });
+                deadline: block.timestamp + 60
+            });
 
         (tokenId, liquidity, amount0, amount1) = nonfungiblePositionManager.mint(params);
-        emit MintPosition(msg.sender, _token0, _token1, amount0, amount1, liquidity, _lowerTick, _upperTick, tokenId);
+        emit MintPosition(tx.origin, _token0, _token1, amount0, amount1, liquidity, _lowerTick, _upperTick, tokenId);
     }
 
-    function _increasePoolLiquidityCurrentRange(
-        uint256 _currentTokenId,
+    function _increaseLiquidity(
+        uint256 _tokenId,
         uint256 _amount0ToAdd,
         uint256 _amount1ToAdd
     ) private returns (
@@ -432,49 +406,39 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     ) {
 
         INonfungiblePositionManager.IncreaseLiquidityParams memory params =
-        INonfungiblePositionManager.IncreaseLiquidityParams({
-        tokenId: _currentTokenId,
-        amount0Desired: _amount0ToAdd,
-        amount1Desired: _amount1ToAdd,
-        amount0Min: 0,
-        amount1Min: 0,
-        deadline: block.timestamp + DELAY
-        });
+                            INonfungiblePositionManager.IncreaseLiquidityParams({
+                tokenId: _tokenId,
+                amount0Desired: _amount0ToAdd,
+                amount1Desired: _amount1ToAdd,
+                amount0Min: 0,
+                amount1Min: 0,
+                deadline: block.timestamp + 60
+            });
         (liquidity, amount0, amount1) = nonfungiblePositionManager.increaseLiquidity(params);
     }
 
-    function _decreasePoolLiquidityCurrentRange(address _pool, uint128 _liquidity) private returns (
+    function _decreaseLiquidity(
+        uint256 _tokenId,
+        uint128 _liquidity,
+        uint256 _amount0Min,
+        uint256 _amount1Min
+    ) private returns (
         uint256 amount0, uint256 amount1
     ) {
-        uint256 positionId = _poolData[_pool].currentTokenId;
         INonfungiblePositionManager.DecreaseLiquidityParams memory params =
-        INonfungiblePositionManager.DecreaseLiquidityParams({
-        tokenId: positionId,
-        liquidity: _liquidity,
-        amount0Min: 0,
-        amount1Min: 0,
-        deadline: block.timestamp + DELAY
-        });
+                            INonfungiblePositionManager.DecreaseLiquidityParams({
+                tokenId: _tokenId,
+                liquidity: _liquidity,
+                amount0Min: _amount0Min,
+                amount1Min: _amount1Min,
+                deadline: block.timestamp + 60
+            });
         (amount0, amount1) = nonfungiblePositionManager.decreaseLiquidity(params);
     }
 
-    function _getPoolPrice(address _pool) private view returns(uint256) {
-        (uint160 sqrtPriceX96, , , , , , ) = IUniswapV3PoolState(_pool).slot0();
-        return uint256(sqrtPriceX96)*(uint256(sqrtPriceX96)) * MULTIPLIER >> (96 * 2);
-    }
-
-    function _checkPositions(PoolPosition[] memory _positions) private view {
-        uint256 len = _positions.length;
-        require(len > 0, "PoolMaster: wrong positions length");
-        uint256 allPercent = 0;
-        for (uint256 i = 0; i < len; i++) {
-            address currPool = _positions[i].pool;
-            uint256 currPercent = _positions[i].percent;
-            require(whiteListPools.contains(currPool), "PoolMaster: pool is not in the whitelist");
-            require(currPercent <= 100 && currPercent > 0, "PoolMaster: wrong percent");
-            allPercent += _positions[i].percent;
-        }
-        require(allPercent == 100, "PoolMaster: wrong sum percents");
+    function _getPoolPrice(address _pool) private view returns (uint256) {
+        (uint160 sqrtPriceX96, , , , , ,) = IUniswapV3PoolState(_pool).slot0();
+        return uint256(sqrtPriceX96) * (uint256(sqrtPriceX96)) * MULTIPLIER >> (96 * 2);
     }
 
     function _uint256ToString(uint256 _number) private pure returns (string memory) {
@@ -500,6 +464,24 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         }
 
         return string(buffer);
+    }
+
+    function _findIndexByTokenId(uint256 _tokenId) private view returns (uint256) {
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].tokenId == _tokenId) {
+                return i;
+            }
+        }
+        revert("Position not found");
+    }
+
+    function _deletePosition(uint256 _index) private {
+        require(_index < positions.length, "Position index out of bounds");
+        if (_index < positions.length - 1) {
+            PositionInfo memory lastPosition = positions[positions.length - 1];
+            positions[_index] = lastPosition;
+        }
+        positions.pop();
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
