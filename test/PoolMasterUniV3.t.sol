@@ -9,7 +9,7 @@ import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Po
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
-import {PoolMaster} from "../src/PoolMaster.sol";
+import {PoolMasterUniV3} from "../src/PoolMasterUniV3.sol";
 import {IPoolMaster} from "../src/interfaces/IPoolMaster.sol";
 import {MockErc20Token} from "../src/mock/MockErc20Token.sol";
 
@@ -25,7 +25,7 @@ contract PoolMasterTest is Test {
 
     string internal ARBITRUM_MAINNET_RPC_URL = vm.envString("ARBITRUM_MAINNET_RPC_URL");
 
-    PoolMaster internal poolMaster;
+    PoolMasterUniV3 internal poolMaster;
     MockErc20Token internal token0;
     MockErc20Token internal token1;
     INonfungiblePositionManager internal npm = INonfungiblePositionManager(ARBITRUM_NPM);
@@ -41,7 +41,7 @@ contract PoolMasterTest is Test {
     function setUp() public {
         vm.createSelectFork(ARBITRUM_MAINNET_RPC_URL);
 
-        poolMaster = new PoolMaster();
+        poolMaster = new PoolMasterUniV3();
         poolMaster.initialize(owner, ARBITRUM_NPM, ARBITRUM_UNIVERSAL_ROUTER, ARBITRUM_PERMIT2);
 
         MockErc20Token tokenA = new MockErc20Token();
@@ -72,7 +72,7 @@ contract PoolMasterTest is Test {
     }
 
     function test_Revert_InitializeWithZeroAddress() public {
-        PoolMaster newPoolMaster = new PoolMaster();
+        PoolMasterUniV3 newPoolMaster = new PoolMasterUniV3();
         vm.expectRevert("PoolMaster: can not be zero address");
         newPoolMaster.initialize(address(0), ARBITRUM_NPM, ARBITRUM_UNIVERSAL_ROUTER, ARBITRUM_PERMIT2);
     }

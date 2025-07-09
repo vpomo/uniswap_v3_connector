@@ -27,7 +27,7 @@ import "./libraries/TransferHelper.sol";
 import {IUniswapV3Pool} from "../lib/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 
-contract PoolMaster is AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable, IPoolMaster {
+contract PoolMasterUniV3 is AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable, IPoolMaster {
     int24 private constant MIN_TICK = - 887272;
     int24 private constant MAX_TICK = - MIN_TICK;
     int24 private constant TICK_SPACING = 200;
@@ -306,14 +306,14 @@ contract PoolMaster is AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUP
         (amount0, amount1) = getTokenAmounts(_tokenId);
     }
 
+    /// ===============================================================
+    /// internal and private area
+    /// ===============================================================
+
     function _getPriceAndTick() public view returns (uint256, int24) {
         (uint160 sqrtPriceX96, int24 tick,,,,,) = pool.slot0();
         return ((uint256(sqrtPriceX96)*(uint256(sqrtPriceX96) * PRICE_RATE) >> (96 * 2)), tick);
     }
-
-    /// ===============================================================
-    /// internal and private area
-    /// ===============================================================
 
     function _checkAvailableBalance(uint256 _amount0ToAdd, uint256 _amount1ToAdd) private view {
         uint256 balance0 = IERC20(token0).balanceOf(address(this));
