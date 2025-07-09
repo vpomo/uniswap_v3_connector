@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -10,6 +10,7 @@ import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Po
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 import {TickMath} from "./libraries/TickMath.sol";
+import {LiquidityAmounts} from "./libraries/LiquidityAmounts.sol";
 
 import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/IPermit2.sol";
@@ -26,25 +27,27 @@ import "./libraries/TransferHelper.sol";
 import {IUniswapV3Pool} from "../lib/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 
-contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMaster, UUPSUpgradeable {
+contract PoolMaster is AccessControlUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable, IPoolMaster {
     int24 private constant MIN_TICK = - 887272;
     int24 private constant MAX_TICK = - MIN_TICK;
     int24 private constant TICK_SPACING = 200;
 
-    uint256 private constant MULTIPLIER = 1 ether;
+    uint256 public constant PRICE_RATE = 10 ** 8;
     uint256 private constant DELAY = 100;
 
     uint8 private constant V3_SWAP_EXACT_IN = 0x00;
     uint8 private constant V3_SWAP_EXACT_OUT = 0x01;
 
+    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
+
     INonfungiblePositionManager public nonfungiblePositionManager;
     IUniversalRouter public universalRouter;
-    address public permit2; //0x000000000022D473030F116dDEE9F6B43aC78BA3
+    address public permit2;
 
     address public token0;
     address public token1;
     uint24 public fee;
-    int24 tickSpacing;
+    int24 public tickSpacing;
     IUniswapV3Pool public pool;
 
     PositionInfo[] public positions;
@@ -53,39 +56,21 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     event RescueToken(address indexed token, address indexed to, uint amount);
 
     event OnERC721Received(address operator, address from, uint256 tokenId, bytes data);
-    event MintCallback(uint256 amount0, uint256 amount1, bytes data);
-    event PoolLiquidityStaked(
-        address indexed user, address indexed pool, uint256 nftId, uint256 token0amount, uint256 token1amount, uint256 liquidityAmount
-    );
-    event PoolLiquidityUnStaked(
-        address indexed user, address indexed pool, uint256 nftId,
-        uint256 token0amount, uint256 token1amount, uint256 liquidityAmount
-    );
     event MintPosition(
         address indexed sender, address token0, address token1,
         uint256 amount0, uint256 amount1, uint128 liquidity,
         int24 lowerTick, int24 upperTick, uint256 tokenId
     );
-    event BurnPosition(address indexed sender, address indexed pool, uint256 tokenId);
-    event ChangeRange(
-        address indexed sender, address indexed pool, uint160 sqrtPriceLimitX96,
-        uint256 amount0, uint256 amount1,
-        int24 lowerTick, int24 upperTick
-    );
-    event CollectAllFees(address indexed pool, uint256 tokenId, uint256 feeAmount0, uint256 feeAmount1);
-    event CreateSomePool(
+    event BurnPosition(address indexed sender, uint256 tokenId);
+    event CollectFees(address indexed pool, uint256 tokenId, uint256 feeAmount0, uint256 feeAmount1);
+    event CreatePool(
         address indexed sender, address token0, address token1,
         uint24 fee, uint160 sqrtPriceLimitX96, address pool
     );
-    event UpdateOracleContract(address sender, address oldContract, address newContract);
-    event RenounceOwnership(address user);
+    event IncreaseLiquidity(address indexed operator, uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
+    event DecreaseLiquidity(address indexed operator, uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
+    event SetPoolData(address indexed operator, address token0, address token1, address pool, uint24 fee, int24 tickSpacing);
 
-    event AddMinter(address indexed operator, address user);
-    event RemoveMinter(address indexed operator, address user);
-    event AddWhiteListPool(address indexed operator, address user);
-    event RemoveWhiteListPool(address indexed operator, address user);
-    event SetIterationVars(address indexed operator, uint256 newMaxIterations, uint256 mewMinPercent);
-    event LogAmounts(uint256 amount0, uint256 amount1);
 
     function initialize(
         address _owner,
@@ -98,19 +83,20 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         _checkZeroAddress(_universalRouter);
         _checkZeroAddress(_permit2);
 
-        __Ownable_init(_owner);
+        __AccessControl_init();
         __ReentrancyGuard_init();
 
         nonfungiblePositionManager = INonfungiblePositionManager(_nonfungiblePositionManager);
         universalRouter = IUniversalRouter(_universalRouter);
         permit2 = _permit2;
+        _grantRole(ADMIN_ROLE, _owner);
     }
 
     receive() external payable {
     }
 
     /// ===============================================================
-    /// writing area for anybody
+    /// writing area for everyone
     /// ===============================================================
 
     function swapExactInputSingle(
@@ -141,8 +127,8 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     /// ===============================================================
 
     function createPool(
-        address _token0, address _token1, uint24 _fee, uint160 _sqrtPriceX96
-    ) external override onlyOwner {
+        address _token0, address _token1, uint24 _fee, int24 _tickSpacing, uint160 _sqrtPriceX96
+    ) external override onlyRole(ADMIN_ROLE) {
         _checkZeroAddress(_token0);
         _checkZeroAddress(_token1);
         _checkZeroAmount(_sqrtPriceX96);
@@ -158,7 +144,8 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         token0 = _token0;
         token1 = _token1;
         fee = _fee;
-//        emit CreatePool(msg.sender, _token0, _token1, _fee, _sqrtPriceX96, poolAddress);
+        tickSpacing = _tickSpacing;
+        emit CreatePool(msg.sender, _token0, _token1, _fee, _sqrtPriceX96, poolAddress);
     }
 
     function mintPosition(
@@ -166,7 +153,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         int24 _tickUpper,
         uint256 _amount0Max,
         uint256 _amount1Max
-    ) external onlyOwner returns (
+    ) external onlyRole(ADMIN_ROLE) returns (
         uint256 tokenId,
         uint128 liquidity,
         uint256 amount0,
@@ -184,28 +171,31 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
             upperTick: _tickUpper
         }));
         _resetApprove(token0, token1);
+        emit MintPosition(tx.origin, token0, token1,
+            amount0, amount1, liquidity,
+    _tickLower, _tickUpper, tokenId
+        );
     }
 
     function burnPosition(
         uint256 _tokenId,
         uint256 _amount0Min,
         uint256 _amount1Min
-    ) public onlyOwner {
+    ) public onlyRole(ADMIN_ROLE) {
         uint256 index = _findIndexByTokenId(_tokenId);
-        _deletePosition(index);
-
         (, , , , , , , uint128 liquidity, , , ,) = nonfungiblePositionManager.positions(_tokenId);
         _decreaseLiquidity(_tokenId, liquidity, _amount0Min, _amount1Min);
         collectPoolAllFees();
         nonfungiblePositionManager.burn(_tokenId);
-        //emit BurnPosition(tx.origin, pool, _tokenId);
+        _deletePosition(index);
+        emit BurnPosition(tx.origin, _tokenId);
     }
 
     function increaseLiquidity(
         uint256 _tokenId,
         uint128 _amount0Max,
         uint128 _amount1Max
-    ) public onlyOwner returns (
+    ) public onlyRole(ADMIN_ROLE) returns (
         uint128 liquidity, uint256 amount0, uint256 amount1
     ) {
         _checkAvailableBalance( _amount0Max, _amount1Max);
@@ -215,7 +205,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         );
         _resetApprove(token0, token1);
         collectPoolAllFees();
-//        emit IncreaseLiquidity(tx.origin, _tokenId, _liquidity);
+        emit IncreaseLiquidity(tx.origin, _tokenId, liquidity, amount0, amount1);
     }
 
     function decreaseLiquidity(
@@ -223,22 +213,39 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         uint128 _liquidity,
         uint256 _amount0Min,
         uint256 _amount1Min
-    ) public onlyOwner returns (uint256 amount0, uint256 amount1)
+    ) public onlyRole(ADMIN_ROLE) returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = _decreaseLiquidity(
             _tokenId, _liquidity, _amount0Min, _amount1Min
         );
         collectPoolAllFees();
+        emit DecreaseLiquidity(tx.origin, _tokenId, _liquidity, amount0, amount1);
     }
 
-    function rescue(address payable _to, uint256 _amount) external override onlyOwner {
+    function setPoolData(
+        address _token0, address _token1,
+        uint24 _fee, int24 _tickSpacing,
+        address _pool
+    ) external onlyRole(ADMIN_ROLE) {
+        _checkZeroAddress(_token0);
+        _checkZeroAddress(_token1);
+        _checkZeroAddress(_pool);
+        token0 = _token0;
+        token1 = _token1;
+        pool = IUniswapV3Pool(_pool);
+        fee = _fee;
+        tickSpacing = _tickSpacing;
+        emit SetPoolData(tx.origin, _token0, _token1, _pool, _fee, _tickSpacing);
+    }
+
+    function rescue(address payable _to, uint256 _amount) external override onlyRole(ADMIN_ROLE) {
         _checkZeroAddress(_to);
         _checkZeroAmount(_amount);
         TransferHelper.safeTransferBNB(_to, _amount);
         emit Rescue(_to, _amount);
     }
 
-    function rescueToken(address _to, address _token, uint256 _amount) external override onlyOwner {
+    function rescueToken(address _to, address _token, uint256 _amount) external override onlyRole(ADMIN_ROLE) {
         _checkZeroAddress(_to);
         _checkZeroAmount(_amount);
         TransferHelper.safeTransfer(_token, _to, _amount);
@@ -264,6 +271,44 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
     /// ===============================================================
     function getPosition(uint256 _id) public override view returns (PositionInfo memory) {
         return positions[_id];
+    }
+
+    function getTokenAmounts(uint256 _tokenId) public view returns (uint256 amount0, uint256 amount1) {
+        (
+            , // nonce
+            , // operator
+            , //token0
+            , //token1
+            , //fee
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            , // feeGrowthInside0LastX128
+            , // feeGrowthInside1LastX128
+            , // tokensOwed0
+        // tokensOwed1
+        ) = nonfungiblePositionManager.positions(_tokenId);
+        if (liquidity == 0) {
+            return (0, 0);
+        }
+        (uint160 sqrtPriceX96, , , , , , ) = pool.slot0();
+        uint160 sqrtPriceAX96 = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtPriceBX96 = TickMath.getSqrtRatioAtTick(tickUpper);
+        (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, liquidity
+        );
+    }
+
+    function getDynamicInfo(uint256 _tokenId) public view returns (
+        uint256 price, int24 currentTick, uint256 amount0, uint256 amount1
+    ) {
+        (price, currentTick) = _getPriceAndTick();
+        (amount0, amount1) = getTokenAmounts(_tokenId);
+    }
+
+    function _getPriceAndTick() public view returns (uint256, int24) {
+        (uint160 sqrtPriceX96, int24 tick,,,,,) = pool.slot0();
+        return ((uint256(sqrtPriceX96)*(uint256(sqrtPriceX96) * PRICE_RATE) >> (96 * 2)), tick);
     }
 
     /// ===============================================================
@@ -331,7 +376,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         uint256 _amountOutMin,
         address _recipient
     ) private returns (uint256 amountOut) {
-        uint256 beforeAmountOut = IERC20(_tokenOut).balanceOf(address(this));
+        uint256 beforeAmountOut = IERC20(_tokenOut).balanceOf(_recipient);
         uint256 deadline = block.timestamp + 60;
         IPermit2(permit2).approve(_tokenIn, address(universalRouter), uint160(_amountIn), uint48(deadline));
         TransferHelper.safeApprove(_tokenIn, permit2, _amountIn);
@@ -351,7 +396,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         inputs[0] = input0;
 
         universalRouter.execute{value: 0}(commands, inputs, deadline);
-        uint256 afterAmountOut = IERC20(_tokenOut).balanceOf(address(this));
+        uint256 afterAmountOut = IERC20(_tokenOut).balanceOf(_recipient);
         return afterAmountOut - beforeAmountOut;
     }
 
@@ -365,6 +410,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
             });
 
         (feeAmount0, feeAmount1) = nonfungiblePositionManager.collect(params);
+        emit CollectFees(address(pool), _tokenId,feeAmount0, feeAmount1);
     }
 
     function _mintPosition(
@@ -446,7 +492,7 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
 
     function _getPoolPrice(address _pool) private view returns (uint256) {
         (uint160 sqrtPriceX96, , , , , ,) = IUniswapV3PoolState(_pool).slot0();
-        return uint256(sqrtPriceX96) * (uint256(sqrtPriceX96)) * MULTIPLIER >> (96 * 2);
+        return uint256(sqrtPriceX96) * (uint256(sqrtPriceX96)) * PRICE_RATE >> (96 * 2);
     }
 
     function _uint256ToString(uint256 _number) private pure returns (string memory) {
@@ -492,5 +538,5 @@ contract PoolMaster is OwnableUpgradeable, ReentrancyGuardUpgradeable, IPoolMast
         positions.pop();
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
 }

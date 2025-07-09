@@ -89,4 +89,6 @@ interface INonfungiblePositionManager {
     function balanceOf(address user) external view returns (uint256);
 
     function tokenOfOwnerByIndex(address user, uint256 index) external view returns (uint256);
+
+    function ownerOf(uint256 _tokenId) external view returns (address);
 }

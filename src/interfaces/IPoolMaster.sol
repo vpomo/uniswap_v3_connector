@@ -15,7 +15,7 @@ interface IPoolMaster is IERC721Receiver {
     }
 
     function createPool(
-        address _token0, address _token1, uint24 _fee, uint160 _sqrtPriceX96
+        address _token0, address _token1, uint24 _fee, int24 _tickSpacing, uint160 _sqrtPriceX96
     ) external;
 
     function rescue(address payable _to, uint256 _amount) external;
